@@ -7,6 +7,7 @@ export interface ChatResponse {
   products?: Product[];
   crossSell?: Product[];
   upsell?: UpsellData;
+  payment?: any;
 }
 
 /**

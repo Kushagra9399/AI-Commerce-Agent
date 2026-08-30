@@ -67,7 +67,7 @@ export async function createPayment(orderId: string): Promise<PaymentCreateRespo
         currency: data.currency || 'INR',
         key_id: data.key_id || data.razorpay_key_id || 'rzp_test_demokey123456',
         razorpay_key_id: data.razorpay_key_id || data.key_id || 'rzp_test_demokey123456',
-        status: data.status || 'payment_pending',
+        status: data.status || 'pending_payment',
       };
     }
   } catch (err) {
@@ -79,8 +79,8 @@ export async function createPayment(orderId: string): Promise<PaymentCreateRespo
   const amount = order ? order.total_amount : 0;
 
   return {
-    order_id: orderId,
-    status: 'payment_pending',
+  order_id: orderId,
+  status: 'pending_payment',
     razorpay_order_id: `rzp_ord_${Math.random().toString(36).substring(2, 10)}`,
     amount: amount,
     currency: 'INR',

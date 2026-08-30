@@ -49,6 +49,7 @@ export interface ChatMessage {
   crossSell?: Product[];
   upsell?: UpsellData;
   actionPrompt?: string;
+  payment?: PaymentCreateResponse;
 }
 
 export interface CartItem {
@@ -73,7 +74,7 @@ export interface Order {
   cart_id: string;
   total_amount: number;
   currency: string;
-  status: 'draft' | 'pending_approval' | 'approved' | 'payment_pending' | 'paid' | 'payment_failed' | 'cancelled';
+  status: 'draft' | 'pending_approval' | 'approved' | 'pending_payment' | 'paid' | 'payment_failed' | 'cancelled';
   items?: CartItem[];
   created_at?: string;
   payment_id?: string;

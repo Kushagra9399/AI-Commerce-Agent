@@ -140,6 +140,8 @@ def create_order(
 
     order.razorpay_order_id = razorpay_order["id"]
 
+    cart.status = "converted"
+
     db.commit()
     db.refresh(order)
 
@@ -177,4 +179,112 @@ def create_order(
             ),
             "currency": order.currency
         }
+    }
+
+
+def get_orders(
+    db: Session,
+    status: str | None = None,
+    limit: int = 10
+):
+
+    query = (
+        db.query(Order)
+        .order_by(Order.created_at.desc())
+    )
+
+    if status:
+        query = query.filter(
+            Order.status == status
+        )
+
+    orders = query.limit(limit).all()
+
+    result = []
+
+    for order in orders:
+
+        items = (
+            db.query(OrderItem)
+            .filter(
+                OrderItem.order_id == order.id
+            )
+            .all()
+        )
+
+        order_items = []
+
+        for item in items:
+
+            order_items.append({
+                "product_id": item.product_id,
+                "product_name": item.product_name,
+                "quantity": item.quantity,
+                "unit_price": float(item.unit_price),
+                "total_price": float(item.total_price)
+            })
+
+        result.append({
+            "order_id": order.id,
+            "cart_id": order.cart_id,
+            "merchant_id": order.merchant_id,
+            "status": order.status,
+            "subtotal": float(order.subtotal),
+            "discount": float(order.discount),
+            "total": float(order.total),
+            "currency": order.currency,
+            "created_at": order.created_at,
+            "updated_at": order.updated_at,
+            "items": order_items
+        })
+
+    return result
+
+
+def get_order(
+    db: Session,
+    order_id: str
+):
+
+    order = (
+        db.query(Order)
+        .filter(Order.id == order_id)
+        .first()
+    )
+
+    if not order:
+        return None
+
+    items = (
+        db.query(OrderItem)
+        .filter(
+            OrderItem.order_id == order.id
+        )
+        .all()
+    )
+
+    order_items = []
+
+    for item in items:
+
+        order_items.append({
+            "product_id": item.product_id,
+            "product_name": item.product_name,
+            "quantity": item.quantity,
+            "unit_price": float(item.unit_price),
+            "total_price": float(item.total_price)
+        })
+
+    return {
+        "order_id": order.id,
+        "cart_id": order.cart_id,
+        "merchant_id": order.merchant_id,
+        "status": order.status,
+        "subtotal": float(order.subtotal),
+        "discount": float(order.discount),
+        "total": float(order.total),
+        "currency": order.currency,
+        "created_at": order.created_at,
+        "updated_at": order.updated_at,
+        "items": order_items
     }

@@ -252,15 +252,55 @@ export const CommerceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setSessionId(response.session_id);
       }
 
+      // Normalize possible nesting: agent may return structured payloads under
+      // `response.message` when tools produce a dict. Support both shapes.
+      const payload = typeof response.message === 'object' && response.message !== null ? response.message : response;
+
       const agentMsg: ChatMessage = {
         id: `msg_agent_${Date.now()}`,
         sender: 'agent',
-        text: response.message,
+        text: typeof response.message === 'string' ? response.message : (payload.message || JSON.stringify(payload)),
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        products: response.products,
-        crossSell: response.crossSell,
-        upsell: response.upsell,
+        products: payload.products,
+        crossSell: payload.crossSell,
+        upsell: payload.upsell,
+        payment: payload.payment,
       };
+
+      // If agent returned a payment payload directly (e.g. create_order tool),
+      // set the current order id and record an audit log so UI shows Pay button.
+      const payloadPayment = payload.payment || (response as any).payment;
+      if (payloadPayment) {
+        const payment = payloadPayment;
+        const orderIdFromPayment = payment.order_id || (payload.order && (payload.order.id || payload.order.order_id)) || (response as any).order?.id || payment.orderId || payment.orderId;
+        if (orderIdFromPayment) {
+          setOrderId(orderIdFromPayment);
+        }
+
+        addAuditLog(
+          'Order Created (Tool)',
+          'Order creation with payment ready',
+          'AI Agent',
+          `Order ${orderIdFromPayment || payment.razorpay_order_id} is ready for payment`,
+          'in_progress'
+        );
+      }
+
+      // If full order object came back from the agent, add it to orders state
+      const payloadOrder = payload.order || (response as any).order;
+      if (payloadOrder) {
+        const ord = payloadOrder;
+        const orderSnapshot: Order = {
+          order_id: ord.id || ord.order_id || ord.orderId,
+          cart_id: ord.cart_id || '',
+          total_amount: ord.total || ord.total_amount || 0,
+          currency: ord.currency || 'INR',
+          status: ord.status || 'pending_payment',
+          items: ord.items || [],
+          created_at: new Date().toISOString(),
+        };
+        addOrder(orderSnapshot);
+      }
 
       setMessages((prev) => [...prev, agentMsg]);
 

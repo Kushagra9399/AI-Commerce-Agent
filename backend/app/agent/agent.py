@@ -1,10 +1,11 @@
 import os
 import json
-from datetime import date, datetime
-from decimal import Decimal
+import time
 from uuid import UUID
+from decimal import Decimal
+from datetime import date, datetime
 
-from groq import Groq
+from groq import Groq, RateLimitError
 
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tools import (
@@ -16,8 +17,12 @@ from app.agent.tools import (
     add_to_cart, 
     get_cart,
     approve_purchase,
-    create_order
+    create_order,
+    get_all_carts,
+    get_orders,
+    get_order
 )
+
 from app.core.config import settings
 from app.agent.session import get_session
 
@@ -323,6 +328,79 @@ CREATE_ORDER_TOOL = {
     }
 }
 
+GET_ALL_CARTS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_all_carts",
+        "description": (
+            "Retrieve the buyer's carts. "
+            "Use this when the buyer asks to see "
+            "their carts or wants information about "
+            "previous or active carts."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {}
+        }
+    }
+}
+
+GET_ORDERS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_orders",
+        "description": (
+            "Retrieve the buyer's orders. "
+            "Use this when the buyer asks about "
+            "previous orders, order history, or "
+            "the status of an order."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": (
+                        "Optional order status filter, "
+                        "such as pending_payment, paid, "
+                        "completed, failed, or cancelled."
+                    )
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of orders.",
+                    "default": 10
+                }
+            }
+        }
+    }
+}
+
+GET_ORDER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_order",
+        "description": (
+            "Retrieve complete information about a specific "
+            "order using its order ID. "
+            "Use this whenever the buyer asks about a specific "
+            "order, its status, products, amount, or payment state. "
+            "Do not create a new order when an existing order "
+            "may already exist. Check the existing order first."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "order_id": {
+                    "type": "string",
+                    "description": "Unique order ID."
+                }
+            },
+            "required": ["order_id"]
+        }
+    }
+}
+
 tools = [
     SEARCH_PRODUCTS_TOOL,
     GET_PRODUCT_TOOL,
@@ -331,12 +409,41 @@ tools = [
     CREATE_CART_TOOL,
     ADD_TO_CART_TOOL,
     GET_CART_TOOL,
+    GET_ALL_CARTS_TOOL,
     APPROVE_CART_TOOL,
-    CREATE_ORDER_TOOL
+    CREATE_ORDER_TOOL,
+    GET_ORDER_TOOL,
+    GET_ORDERS_TOOL
 ]
 
 MAX_TOOL_ROUNDS = 5
 MAX_HISTORY_MESSAGES = 30
+
+def call_llm(messages, tools):
+
+    for attempt in range(3):
+
+        try:
+            return client.chat.completions.create(
+                model="openai/gpt-oss-20b",
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                max_tokens=1000,
+            )
+
+        except RateLimitError as e:
+
+            if attempt == 2:
+                raise
+
+            print(
+                f"Groq rate limit hit. "
+                f"Retrying in 5 seconds... "
+                f"(attempt {attempt + 1}/3)"
+            )
+
+            time.sleep(5)
 
 
 def chat(session_id: str, user_message: str):
@@ -365,12 +472,9 @@ def chat(session_id: str, user_message: str):
 
     for round_number in range(MAX_TOOL_ROUNDS):
 
-        response = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
+        response = call_llm(
             messages=history,
-            tools=tools,
-            tool_choice="auto",
-            max_tokens=1000,
+            tools=tools
         )
 
         message = response.choices[0].message
@@ -443,15 +547,31 @@ def chat(session_id: str, user_message: str):
                         **arguments
                     )
                 
-                elif tool_call.function.name == "approve_purchase":
+                elif tool_name == "approve_purchase":
 
                     result = approve_purchase(
                         **arguments
                     )
                 
-                elif tool_call.function.name == "create_order":
+                elif tool_name == "create_order":
 
                     result = create_order(
+                        **arguments
+                    )
+                
+                elif tool_name == "get_all_carts":
+
+                    result = get_all_carts()
+
+                elif tool_name == "get_orders":
+
+                    result = get_orders(
+                        **arguments
+                    )
+                
+                elif tool_name == "get_order":
+
+                    result = get_order(
                         **arguments
                     )
 
@@ -478,6 +598,45 @@ def chat(session_id: str, user_message: str):
                     default=json_serializer
                 )
             })
+
+            # If the tool created an order with payment details, return a structured
+            # assistant response immediately so the frontend can render a Pay button
+            # and initiate the Razorpay checkout flow.
+            try:
+                if tool_call.function.name == "create_order":
+                    # result is expected to include keys: success, order, payment
+                    if result and isinstance(result, dict) and result.get("success"):
+                        order_obj = result.get("order") or {}
+                        payment_obj = result.get("payment") or {}
+
+                        # Ensure payment payload includes the internal order id
+                        try:
+                            payment_obj["order_id"] = payment_obj.get("order_id") or order_obj.get("id")
+                        except Exception:
+                            pass
+
+                        assistant_payload = {
+                            "message": (
+                                f"Created order {order_obj.get('id')} for payment. "
+                                "Click the Pay button to continue."
+                            ),
+                            "order": order_obj,
+                            "payment": payment_obj
+                        }
+
+                        history.append({
+                            "role": "assistant",
+                            "content": json.dumps(
+                                assistant_payload,
+                                ensure_ascii=False,
+                                default=json_serializer
+                            )
+                        })
+
+                        return assistant_payload
+            except Exception:
+                # swallow and continue agent loop if anything unexpected occurs
+                pass
 
     # Agent exceeded tool limit
     history.append({

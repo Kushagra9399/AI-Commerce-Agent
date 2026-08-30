@@ -261,3 +261,69 @@ def approve_cart(
         )
     }
 
+
+def get_all_carts(db: Session):
+    carts = (
+        db.query(Cart)
+        .order_by(Cart.created_at.desc())
+        .all()
+    )
+
+    result = []
+
+    for cart in carts:
+
+        items = (
+            db.query(CartItem)
+            .filter(CartItem.cart_id == cart.id)
+            .all()
+        )
+
+        cart_items = []
+
+        subtotal = 0.0
+
+        for item in items:
+
+            product = (
+                db.query(Product)
+                .filter(Product.id == item.product_id)
+                .first()
+            )
+
+            item_total = (
+                float(item.unit_price) * item.quantity
+            )
+
+            subtotal += item_total
+
+            cart_items.append({
+                "product_id": item.product_id,
+                "product_name": (
+                    product.name
+                    if product
+                    else "Unknown Product"
+                ),
+                "quantity": item.quantity,
+                "unit_price": float(item.unit_price),
+                "total_price": round(item_total, 2)
+            })
+
+        result.append({
+            "cart_id": cart.id,
+            "merchant_id": cart.merchant_id,
+            "status": cart.status,
+            "buyer_approved": cart.buyer_approved,
+            "approved_total": (
+                float(cart.approved_total)
+                if cart.approved_total is not None
+                else None
+            ),
+            "approved_at": cart.approved_at,
+            "created_at": cart.created_at,
+            "updated_at": cart.updated_at,
+            "subtotal": round(subtotal, 2),
+            "items": cart_items
+        })
+
+    return result

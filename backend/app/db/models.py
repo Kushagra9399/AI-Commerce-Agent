@@ -307,6 +307,16 @@ class Order(Base):
         nullable=False
     )
 
+    payment_signature = Column(
+        Text,
+        nullable=True
+    )
+
+    payment_verified_at = Column(
+        DateTime,
+        nullable=True
+    )
+
 
 
 class OrderItem(Base):

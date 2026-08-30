@@ -6,7 +6,11 @@ from app.services.recommendation_service import (
 )
 from app.services.product_search_service import ProductSearchService
 
-from app.services.order_service import create_order as create_order_service
+from app.services.order_service import (
+    create_order as create_order_service,
+    get_orders as get_orders_service,
+    get_order as get_order_service
+)
 
 from app.services.upsell_service import UpsellService
 
@@ -15,7 +19,8 @@ from app.services.cart_service import (
     create_cart as create_cart_service,
     add_product_to_cart,
     get_cart_details,
-    approve_cart
+    approve_cart,
+    get_all_carts as get_all_carts_service
 )
 
 
@@ -315,3 +320,56 @@ def create_order(cart_id: str):
                     str(e)
                 )
             }
+        
+
+def get_all_carts():
+
+    with db_session() as db:
+
+        carts = get_all_carts_service(db)
+
+        return {
+            "count": len(carts),
+            "carts": carts
+        }
+    
+
+def get_orders(
+    status: str | None = None,
+    limit: int = 10
+):
+
+    with db_session() as db:
+
+        orders = get_orders_service(
+            db=db,
+            status=status,
+            limit=limit
+        )
+
+        return {
+            "count": len(orders),
+            "orders": orders
+        }
+    
+
+def get_order(order_id: str):
+
+    with db_session() as db:
+
+        order = get_order_service(
+            db=db,
+            order_id=order_id
+        )
+
+        if not order:
+            return {
+                "found": False,
+                "order": None,
+                "message": "Order not found."
+            }
+
+        return {
+            "found": True,
+            "order": order
+        }

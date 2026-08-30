@@ -48,7 +48,7 @@ export const OrdersPage: React.FC = () => {
           </span>
         );
       case 'approved':
-      case 'payment_pending':
+      case 'pending_payment':
         return (
           <span
             style={{
@@ -200,7 +200,7 @@ export const OrdersPage: React.FC = () => {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
           {orders.map((order) => {
             const isPaid = order.status === 'paid';
-            const isPendingPayment = order.status === 'approved' || order.status === 'payment_pending';
+            const isPendingPayment = order.status === 'approved' || order.status === 'pending_payment';
 
             return (
               <div
