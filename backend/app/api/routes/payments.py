@@ -1,0 +1,596 @@
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.orm import Session
+
+from app.db.database import get_db
+from app.db.models import Order, OrderItem, Product
+from app.services.payment_service import PaymentService
+from app.services.audit_service import log_event
+from pydantic import BaseModel
+from app.core.config import settings
+
+from app.services.payment_verification_service import (
+    verify_payment
+)
+
+payment_service = PaymentService()
+
+
+class PaymentVerificationRequest(BaseModel):
+
+    razorpay_payment_id: str
+
+    razorpay_signature: str
+
+
+router = APIRouter(
+    prefix="/api/payments",
+    tags=["Payments"]
+)
+
+
+class PaymentVerifyRequest(BaseModel):
+
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+@router.post("/verify")
+def verify_payment_endpoint(
+    request: PaymentVerifyRequest,
+    db: Session = Depends(get_db)
+):
+
+    try:
+
+        return verify_payment(
+            db=db,
+            razorpay_order_id=request.razorpay_order_id,
+            razorpay_payment_id=request.razorpay_payment_id,
+            razorpay_signature=request.razorpay_signature
+        )
+
+    except ValueError as e:
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
+
+
+@router.post("/webhook")
+async def razorpay_webhook(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+
+    body = await request.body()
+
+    signature = request.headers.get(
+        "X-Razorpay-Signature"
+    )
+
+    if not signature:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Missing Razorpay signature"
+        )
+
+    valid = payment_service.verify_webhook_signature(
+        payload=body,
+        signature=signature
+    )
+
+    if not valid:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid webhook signature"
+        )
+
+    payload = json.loads(body)
+
+    event = payload.get("event")
+
+    # --------------------------------
+    # PAYMENT CAPTURED
+    # --------------------------------
+
+    if event == "payment.captured":
+
+        payment_entity = (
+            payload
+            .get("payload", {})
+            .get("payment", {})
+            .get("entity", {})
+        )
+
+        razorpay_payment_id = payment_entity.get("id")
+        razorpay_order_id = payment_entity.get("order_id")
+
+        order = (
+            db.query(Order)
+            .filter(
+                Order.razorpay_order_id
+                == razorpay_order_id
+            )
+            .first()
+        )
+
+        if order:
+
+            order.payment_id = razorpay_payment_id
+            order.payment_status = "paid"
+            order.status = "paid"
+
+            db.commit()
+
+            log_event(
+                db=db,
+                action="PAYMENT_CAPTURED",
+                actor="RAZORPAY",
+                order_id=order.id,
+                details={
+                    "razorpay_payment_id":
+                        razorpay_payment_id,
+                    "razorpay_order_id":
+                        razorpay_order_id
+                }
+            )
+
+    # --------------------------------
+    # PAYMENT FAILED
+    # --------------------------------
+
+    elif event == "payment.failed":
+
+        payment_entity = (
+            payload
+            .get("payload", {})
+            .get("payment", {})
+            .get("entity", {})
+        )
+
+        razorpay_payment_id = payment_entity.get("id")
+        razorpay_order_id = payment_entity.get("order_id")
+
+        order = (
+            db.query(Order)
+            .filter(
+                Order.razorpay_order_id
+                == razorpay_order_id
+            )
+            .first()
+        )
+
+        if order:
+
+            order.payment_id = razorpay_payment_id
+            order.payment_status = "failed"
+            order.status = "payment_failed"
+
+            db.commit()
+
+            log_event(
+                db=db,
+                action="PAYMENT_FAILED",
+                actor="RAZORPAY",
+                order_id=order.id,
+                details={
+                    "razorpay_payment_id":
+                        razorpay_payment_id,
+                    "razorpay_order_id":
+                        razorpay_order_id,
+                    "error": payment_entity.get(
+                        "error_description"
+                    )
+                }
+            )
+
+    return {
+        "received": True
+    }
+
+
+@router.post("/{order_id}/create")
+def create_payment(
+    order_id: str,
+    db: Session = Depends(get_db)
+):
+
+    order = (
+        db.query(Order)
+        .filter(Order.id == order_id)
+        .first()
+    )
+
+    if not order:
+        raise HTTPException(
+            status_code=404,
+            detail="Order not found"
+        )
+    
+    if order.status == "payment_pending":
+        return {
+            "order_id": order.id,
+            "status": order.status,
+            "razorpay_order_id": order.razorpay_order_id,
+            "amount": float(order.total),
+            "currency": order.currency,
+            "message": "Payment is already in progress."
+        }
+
+    if order.status == "paid":
+        return {
+            "order_id": order.id,
+            "status": "paid",
+            "message": "Order has already been paid."
+        }
+
+    # Critical safety check
+    if order.status != "approved":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Payment cannot be initiated. "
+                "Buyer approval is required."
+            )
+        )
+
+    try:
+
+        if settings.demo_payment_failure:
+
+            order.status = "payment_failed"
+
+            order.payment_error = (
+                "Simulated payment failure for demo"
+            )
+
+            db.commit()
+
+            log_event(
+                db=db,
+                action="PAYMENT_FAILED",
+                actor="PAYMENT_GATEWAY",
+                order_id=order.id,
+                details={
+                    "reason": "DEMO_FAILURE"
+                }
+            )
+
+            return {
+                "order_id": order.id,
+                "status": "payment_failed",
+                "message": (
+                    "Payment could not be completed."
+                )
+            }
+
+        items = (
+            db.query(OrderItem)
+            .filter(OrderItem.order_id == order.id)
+            .all()
+        )
+
+        for item in items:
+
+            product = (
+                db.query(Product)
+                .filter(Product.id == item.product_id)
+                .first()
+            )
+
+            if not product:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{item.product_name} is unavailable."
+                )
+
+            if product.stock < item.quantity:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "Product stock changed.",
+                        "product": item.product_name,
+                        "available": product.stock,
+                        "requested": item.quantity
+                    }
+                )
+
+        razorpay_order = (
+            payment_service.create_payment_order(
+                amount=float(order.total),
+                currency=order.currency
+            )
+        )
+
+        order.razorpay_order_id = (
+            razorpay_order["id"]
+        )
+
+        order.status = "payment_pending"
+
+        db.commit()
+
+        log_event(
+            db=db,
+            action="PAYMENT_INITIATED",
+            actor="AI_AGENT",
+            order_id=order.id,
+            details={
+                "razorpay_order_id":
+                    razorpay_order["id"],
+                "amount":
+                    float(order.total),
+                "currency":
+                    order.currency
+            }
+        )
+
+        return {
+            "order_id": order.id,
+            "status": order.status,
+            "razorpay_order_id":
+                razorpay_order["id"],
+            "amount":
+                float(order.total),
+            "currency":
+                order.currency,
+            "razorpay_key_id":
+                payment_service.client.auth[0]
+        }
+
+    except Exception as e:
+
+        order.status = "payment_failed"
+        order.payment_error = str(e)
+
+        db.commit()
+
+        log_event(
+            db=db,
+            action="PAYMENT_INITIATION_FAILED",
+            actor="SYSTEM",
+            order_id=order.id,
+            details={
+                "error": str(e)
+            }
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail="Payment service unavailable"
+        )
+    
+
+@router.post("/{order_id}/verify")
+def verify_payment(
+    order_id: str,
+    request: PaymentVerificationRequest,
+    db: Session = Depends(get_db)
+):
+
+    order = (
+        db.query(Order)
+        .filter(Order.id == order_id)
+        .first()
+    )
+
+    if not order:
+        raise HTTPException(
+            status_code=404,
+            detail="Order not found"
+        )
+
+    if order.status != "payment_pending":
+        raise HTTPException(
+            status_code=400,
+            detail="Order is not awaiting payment"
+        )
+    
+    items = (
+        db.query(OrderItem)
+        .filter(OrderItem.order_id == order.id)
+        .all()
+    )
+
+    if not items:
+        raise HTTPException(
+            status_code=400,
+            detail="Order has no items.",
+        )
+
+    try:
+
+        payment_service.verify_payment(
+            razorpay_order_id=
+                order.razorpay_order_id,
+
+            razorpay_payment_id=
+                request.razorpay_payment_id,
+
+            razorpay_signature=
+                request.razorpay_signature
+        )
+
+        for item in items:
+
+            product = (
+                db.query(Product)
+                .filter(Product.id == item.product_id)
+                .with_for_update()
+                .first()
+            )
+
+            if not product:
+                raise ValueError(
+                    f"Product not found: {item.product_name}"
+                )
+
+            if product.stock < item.quantity:
+                raise ValueError(
+                    f"Insufficient stock for "
+                    f"{item.product_name}"
+                )
+
+            product.stock -= item.quantity
+
+            if product.stock == 0:
+                product.is_active = False
+
+        order.payment_id = (
+            request.razorpay_payment_id
+        )
+
+        order.status = "paid"
+
+        db.commit()
+
+        log_event(
+            db=db,
+            action="PAYMENT_SUCCESS",
+            actor="RAZORPAY",
+            order_id=order.id,
+            details={
+                "payment_id":
+                    request.razorpay_payment_id,
+                "amount":
+                    float(order.total)
+            }
+        )
+
+        return {
+            "order_id": order.id,
+            "status": "paid",
+            "payment_id":
+                request.razorpay_payment_id,
+            "message":
+                "Payment verified successfully."
+        }
+
+    except Exception as e:
+
+        order.status = "payment_failed"
+        order.payment_error = str(e)
+
+        db.commit()
+
+        log_event(
+            db=db,
+            action="PAYMENT_FAILED",
+            actor="RAZORPAY",
+            order_id=order.id,
+            details={
+                "error": str(e)
+            }
+        )
+
+        raise HTTPException(
+            status_code=400,
+            detail="Payment verification failed"
+        )
+
+
+@router.post("/{order_id}/retry")
+def retry_payment(
+    order_id: str,
+    db: Session = Depends(get_db)
+):
+
+    order = (
+        db.query(Order)
+        .filter(Order.id == order_id)
+        .first()
+    )
+
+    if not order:
+        raise HTTPException(
+            status_code=404,
+            detail="Order not found"
+        )
+
+    if order.status != "payment_failed":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Payment retry is only available "
+                "after a failed payment."
+            )
+        )
+
+    # Return the order to an approved state.
+    # Buyer approval is still valid because
+    # the order total has not changed.
+    order.status = "approved"
+    order.payment_error = None
+
+    db.commit()
+
+    log_event(
+        db=db,
+        action="PAYMENT_RETRY_REQUESTED",
+        actor="BUYER",
+        order_id=order.id,
+        details={
+            "amount": float(order.total)
+        }
+    )
+
+    return {
+        "order_id": order.id,
+        "status": order.status,
+        "message": (
+            "Payment can be retried. "
+            "No new order was created."
+        )
+    }
+
+
+@router.post("/{order_id}/cancel")
+def cancel_payment(
+    order_id: str,
+    db: Session = Depends(get_db)
+):
+
+    order = (
+        db.query(Order)
+        .filter(Order.id == order_id)
+        .first()
+    )
+
+    if not order:
+        raise HTTPException(
+            status_code=404,
+            detail="Order not found"
+        )
+
+    if order.status not in [
+        "payment_failed",
+        "approved"
+    ]:
+        raise HTTPException(
+            status_code=400,
+            detail="Order cannot be cancelled."
+        )
+
+    order.status = "cancelled"
+
+    db.commit()
+
+    log_event(
+        db=db,
+        action="ORDER_CANCELLED",
+        actor="BUYER",
+        order_id=order.id,
+        details={}
+    )
+
+    return {
+        "order_id": order.id,
+        "status": "cancelled",
+        "message": "Order cancelled successfully."
+    }
+
+
