@@ -45,7 +45,7 @@ def verify_payment_endpoint(
 
     try:
 
-        return process_verified_payment(
+        result = process_verified_payment(
             db=db,
             razorpay_order_id=request.razorpay_order_id,
             razorpay_payment_id=request.razorpay_payment_id,
@@ -53,6 +53,20 @@ def verify_payment_endpoint(
             verify_signature=True,
             actor="SYSTEM",
         )
+
+        return {
+            "success": True,
+            "verified": True,
+            "already_paid": result.get("already_paid", False),
+            "order_id": result.get("order_id"),
+            "payment_id": result.get("payment_id"),
+            "razorpay_payment_id": result.get("payment_id"),
+            "status": "paid",
+            "payment_status": "paid",
+            "message": (
+                "Payment verified and captured successfully."
+            ),
+        }
 
     except ValueError as e:
 
