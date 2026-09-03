@@ -29,6 +29,8 @@ export const ProductDetailsPage: React.FC = () => {
   useEffect(() => {
     if (!productId) return;
     setIsLoading(true);
+    setCrossSell([]);
+    setUpsell(null);
 
     Promise.all([
       api.getProduct(productId),
@@ -207,7 +209,7 @@ export const ProductDetailsPage: React.FC = () => {
             </h4>
             <p style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
               {upsell.upgrade?.reason ||
-                `Higher 120Hz refresh rate and wide color gamut for +₹${upsell.additional_cost || 5000} more.`}
+                `A higher-tier option for +₹${upsell.additional_cost || 0} more.`}
             </p>
           </div>
 

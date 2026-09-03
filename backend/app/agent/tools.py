@@ -14,7 +14,7 @@ from app.services.order_service import (
 
 from app.services.upsell_service import UpsellService
 
-from app.db.models import Cart
+from app.db.models import Cart, Product
 from app.services.cart_service import (
     create_cart as create_cart_service,
     add_product_to_cart,

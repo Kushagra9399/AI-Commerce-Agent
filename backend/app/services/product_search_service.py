@@ -86,7 +86,10 @@ class ProductSearchService:
 
             product = self.metadata[index]
 
-            if in_stock_only and not product["is_active"]:
+            if in_stock_only and (
+                not product["is_active"]
+                or int(product.get("stock", 0)) <= 0
+            ):
                 continue
 
             if max_price is not None:

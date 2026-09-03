@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.db.models import Order
+from app.db.models import Order, OrderItem
 from app.services.order_service import create_order
 
 from pydantic import BaseModel

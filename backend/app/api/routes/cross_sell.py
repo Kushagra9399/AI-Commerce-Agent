@@ -28,5 +28,18 @@ def get_recommendations(
         "product_id": product_id,
         "recommendation_type": "cross_sell",
         "count": len(recommendations),
-        "products": recommendations
+        "products": [
+            {
+                "id": product.id,
+                "name": product.name,
+                "brand": product.brand,
+                "category": product.category,
+                "sale_price": float(product.sale_price),
+                "market_price": float(product.market_price),
+                "discount": float(product.discount_percent),
+                "stock": product.stock,
+                "overview": product.overview,
+            }
+            for product in recommendations
+        ]
     }

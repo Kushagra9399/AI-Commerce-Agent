@@ -20,6 +20,9 @@ class UpsellService:
             db.query(Product)
             .filter(
                 Product.is_active == True,
+                Product.stock > 0,
+                Product.merchant_id == product.merchant_id,
+                Product.category == product.category,
                 Product.id != product.id,
                 Product.sale_price > product.sale_price,
                 Product.sale_price <= max_price

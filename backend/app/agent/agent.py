@@ -1018,16 +1018,13 @@ def trim_history(history):
     if len(history) <= MAX_HISTORY_MESSAGES:
         return history
 
-    system_message = history[0]
+    retained = history[-(MAX_HISTORY_MESSAGES - 1):]
 
-    recent_messages = history[
-        -(MAX_HISTORY_MESSAGES - 1):
-    ]
+    while retained and retained[0].get("role") == "tool":
+        retained.pop(0)
 
-    return [
-        system_message,
-        *recent_messages
-    ]
+    history[:] = [history[0], *retained]
+    return history
 
 
 # ============================================================
