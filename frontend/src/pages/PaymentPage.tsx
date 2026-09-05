@@ -25,17 +25,32 @@ export const PaymentPage: React.FC = () => {
     setOrderId(orderId);
     setIsLoading(true);
 
+    // Check if order is already paid before trying to create payment
     api
-      .createPayment(orderId)
+      .getOrder(orderId)
+      .then((order) => {
+        // If order already paid, redirect to success page
+        if (order.status === 'paid' || order.payment_status === 'paid') {
+          navigate(
+            `/payment/${orderId}/success?payment_id=${order.payment_id || 'verified'}&amount=${order.total_amount || 0}`
+          );
+          return;
+        }
+
+        // Order not paid, create payment
+        return api.createPayment(orderId);
+      })
       .then((data) => {
-        setPaymentData(data);
-        addAuditLog(
-          'Payment Initiated',
-          'Create Razorpay Order',
-          'Razorpay Gateway',
-          `Created Razorpay order #${data.razorpay_order_id} for amount ₹${data.amount}`,
-          'in_progress'
-        );
+        if (data) {
+          setPaymentData(data);
+          addAuditLog(
+            'Payment Initiated',
+            'Create Razorpay Order',
+            'Razorpay Gateway',
+            `Created Razorpay order #${data.razorpay_order_id} for amount ₹${Math.floor(data.amount) > 100000 ? (data.amount / 100).toFixed(2) : data.amount}`,
+            'in_progress'
+          );
+        }
       })
       .catch((err) => {
         console.error('Error creating payment:', err);
@@ -44,7 +59,7 @@ export const PaymentPage: React.FC = () => {
       .finally(() => {
         setIsLoading(false);
       });
-  }, [orderId, addAuditLog, setOrderId]);
+  }, [orderId, addAuditLog, setOrderId, navigate]);
 
   const handlePaymentSuccess = (verifiedData: PaymentVerifyResponse) => {
     if (!orderId) return;

@@ -177,8 +177,13 @@ export function useCommerce() {
         sender: 'agent',
         text: response.message,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        products: response.products,
-        crossSell: response.crossSell,
+        products: (response.products || []).filter((p: any, idx: number, arr: any[]) => {
+          const seen = new Set<string>();
+          return arr.findIndex((x) => (x.name || '').trim().toLowerCase() === (p.name || '').trim().toLowerCase()) === idx;
+        }),
+        crossSell: (response.crossSell || []).filter((p: any, idx: number, arr: any[]) => {
+          return arr.findIndex((x) => (x.name || '').trim().toLowerCase() === (p.name || '').trim().toLowerCase()) === idx;
+        }),
         upsell: response.upsell,
       };
 

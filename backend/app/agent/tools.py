@@ -13,6 +13,7 @@ from app.services.order_service import (
 )
 
 from app.services.upsell_service import UpsellService
+from app.services.audit_service import log_event
 
 from app.db.models import Cart, Product
 from app.services.cart_service import (
@@ -21,6 +22,11 @@ from app.services.cart_service import (
     get_cart_details,
     approve_cart,
     get_all_carts as get_all_carts_service
+)
+
+from app.agent.session import (
+    get_session_metadata,
+    update_session_metadata
 )
 
 
@@ -100,26 +106,41 @@ def recommend_addons(
             )
         )
 
+        # Get the base product for context
+        base_product = db.query(Product).filter(Product.id == product_id).first()
+        base_category = base_product.category if base_product else None
+
+        recommendations = []
+        for product in products:
+            reason = "Pairs well with your selection"
+            
+            # Add category-specific reasoning
+            if base_category and product.category:
+                if base_category == product.category:
+                    reason = f"Complements your {base_category.lower()}"
+                else:
+                    reason = f"Popular add-on to {base_category.lower()} purchases"
+            
+            # Add price-based reasoning
+            if product.discount_percent and float(product.discount_percent) > 15:
+                reason += f" (great value: {product.discount_percent}% off)"
+            
+            recommendations.append({
+                "product_id": product.id,
+                "name": product.name,
+                "brand": product.brand,
+                "category": product.category,
+                "sale_price": float(product.sale_price),
+                "discount_percent": float(product.discount_percent),
+                "stock": product.stock,
+                "why": reason
+            })
+
         return {
             "product_id": product_id,
             "budget_remaining": budget_remaining,
-            "count": len(products),
-            "recommendations": [
-                {
-                    "product_id": product.id,
-                    "name": product.name,
-                    "brand": product.brand,
-                    "category": product.category,
-                    "sale_price": float(
-                        product.sale_price
-                    ),
-                    "discount_percent": float(
-                        product.discount_percent
-                    ),
-                    "stock": product.stock
-                }
-                for product in products
-            ]
+            "count": len(recommendations),
+            "recommendations": recommendations
         }
 
 
@@ -163,6 +184,16 @@ def recommend_upgrade(
             - float(product.sale_price)
         )
 
+        # Generate reasoning
+        upgrade_reason = f"Better model in the same category"
+        
+        if upgrade.brand and product.brand and upgrade.brand.lower() == product.brand.lower():
+            upgrade_reason = f"Same brand, better specs within {upgrade.brand}"
+        
+        discount_diff = float(upgrade.discount_percent) - float(product.discount_percent)
+        if discount_diff > 5:
+            upgrade_reason += f" (extra {discount_diff:.1f}% off)"
+
         return {
             "found": True,
 
@@ -187,7 +218,8 @@ def recommend_upgrade(
                 "discount_percent": float(
                     upgrade.discount_percent
                 ),
-                "stock": upgrade.stock
+                "stock": upgrade.stock,
+                "why": upgrade_reason
             },
 
             "additional_cost": round(
@@ -228,6 +260,12 @@ def add_to_cart(
                 quantity=quantity
             )
 
+            # Return full cart details, not just the item
+            cart_details = get_cart_details(
+                db=db,
+                cart_id=cart_id
+            )
+
             return {
                 "success": True,
                 "cart_item_id": item.id,
@@ -235,9 +273,8 @@ def add_to_cart(
                 "product_id": item.product_id,
                 "quantity": item.quantity,
                 "unit_price": float(item.unit_price),
-                "message": (
-                    "Product added to cart."
-                )
+                "message": "Product added to cart.",
+                "cart": cart_details
             }
 
     except ValueError as e:
@@ -263,6 +300,94 @@ def get_cart(cart_id: str):
 
         return {
             "found": False,
+            "error": str(e)
+        }
+
+
+def check_cart_and_budget(
+    cart_id: str,
+    session_id: str | None = None
+):
+    """
+    Check cart details and validate against user's budget.
+    
+    This is called BEFORE approval to allow explicit buyer confirmation.
+    Logs "APPROVAL_REQUESTED" event.
+    """
+
+    try:
+
+        with db_session() as db:
+
+            cart_details = get_cart_details(
+                db=db,
+                cart_id=cart_id
+            )
+
+            total = cart_details.get("total", 0)
+            
+            # Check against user-stated budget if provided
+            budget_check = {
+                "budget_specified": False,
+                "budget_limit": None,
+                "within_budget": True,
+                "warning": None
+            }
+
+            if session_id:
+                metadata = get_session_metadata(session_id)
+                budget = metadata.get("budget")
+                
+                if budget is not None:
+                    budget_check["budget_specified"] = True
+                    budget_check["budget_limit"] = budget
+                    
+                    if total > budget:
+                        budget_check["within_budget"] = False
+                        budget_check["warning"] = (
+                            f"Cart total (₹{total}) exceeds your stated budget (₹{budget})"
+                        )
+                    
+                    # Log budget check
+                    log_event(
+                        db=db,
+                        action="BUDGET_CHECK",
+                        actor="AI_AGENT",
+                        order_id=None,
+                        details={
+                            "cart_id": cart_id,
+                            "cart_total": total,
+                            "budget_limit": budget,
+                            "within_budget": budget_check["within_budget"]
+                        }
+                    )
+
+                # Log approval request
+                log_event(
+                    db=db,
+                    action="APPROVAL_REQUESTED",
+                    actor="AI_AGENT",
+                    order_id=None,
+                    details={
+                        "cart_id": cart_id,
+                        "cart_total": total,
+                        "item_count": len(cart_details.get("items", []))
+                    }
+                )
+
+            return {
+                "success": True,
+                "cart_id": cart_id,
+                "total": total,
+                "items": cart_details.get("items", []),
+                "budget_check": budget_check,
+                "message": "Ready for approval. Please confirm to proceed to payment."
+            }
+
+    except ValueError as e:
+
+        return {
+            "success": False,
             "error": str(e)
         }
 

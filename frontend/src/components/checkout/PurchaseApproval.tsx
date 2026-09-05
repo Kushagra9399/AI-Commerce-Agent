@@ -61,8 +61,8 @@ export const PurchaseApproval: React.FC<PurchaseApprovalProps> = ({
           </thead>
           <tbody>
             {cart.items.map((item) => (
-              <tr key={item.cart_item_id || item.product_id}>
-                <td style={{ fontWeight: 600 }}>{item.product?.name || item.product_id}</td>
+              <tr key={item.cart_item_id || `item-${item.product_id}`}>
+                <td style={{ fontWeight: 600 }}>{item.product?.name || 'Product'}</td>
                 <td style={{ textAlign: 'center' }}>{item.quantity}</td>
                 <td style={{ textAlign: 'right' }}>{formatINR(item.unit_price)}</td>
                 <td style={{ textAlign: 'right', fontWeight: 700 }}>

@@ -800,6 +800,44 @@
   cursor: not-allowed;
 }
 
+/* Agent-rendered tables (from markdown) */
+.agent-table-container {
+  margin-top: 10px;
+  overflow: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-surface);
+  padding: 8px;
+}
+
+.agent-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 420px;
+}
+
+.agent-table-th,
+.agent-table-td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+  text-align: left;
+  font-size: 13px;
+}
+
+.agent-table-th {
+  background-color: transparent;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.agent-table-td {
+  color: var(--text-primary);
+}
+
+.agent-table tr:hover td {
+  background-color: rgba(99,102,241,0.03);
+}
+
 /* Modals & Dialogs */
 .modal-overlay {
   position: fixed;

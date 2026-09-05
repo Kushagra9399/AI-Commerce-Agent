@@ -75,6 +75,7 @@ class ProductSearchService:
         )
 
         results = []
+        seen_names = set()
 
         for score, index in zip(
             scores[0],
@@ -85,6 +86,13 @@ class ProductSearchService:
                 continue
 
             product = self.metadata[index]
+
+            # Skip duplicates by product name (case-insensitive)
+            name_key = product["name"].strip().lower() if product.get("name") else ""
+            if name_key and name_key in seen_names:
+                continue
+            if name_key:
+                seen_names.add(name_key)
 
             if in_stock_only and (
                 not product["is_active"]

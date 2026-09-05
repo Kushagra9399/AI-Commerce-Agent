@@ -5,6 +5,7 @@ from decimal import Decimal
 from datetime import date, datetime
 
 from groq import Groq, RateLimitError
+import sys
 
 from app.agent.prompts import SYSTEM_PROMPT
 from app.agent.tools import (
@@ -15,6 +16,7 @@ from app.agent.tools import (
     create_cart,
     add_to_cart,
     get_cart,
+    check_cart_and_budget,
     approve_purchase,
     create_order,
     get_all_carts,
@@ -31,8 +33,9 @@ from app.agent.session import get_session
 # ============================================================
 
 MAX_TOOL_ROUNDS = 5
-MAX_HISTORY_MESSAGES = 24
-MAX_TOOL_RESULT_CHARS = 12000
+# Reduced for 8k tokens/min Groq limit
+MAX_HISTORY_MESSAGES = 14
+MAX_TOOL_RESULT_CHARS = 8000
 
 MODEL = "openai/gpt-oss-20b"
 
@@ -92,7 +95,7 @@ def compact_product(product):
     selecting/recommending products.
 
     This is intentionally much smaller than returning the
-    complete database object.
+    complete database object. Optimized for token limits.
     """
 
     if not isinstance(product, dict):
@@ -107,17 +110,15 @@ def compact_product(product):
         "name": product.get("name"),
         "brand": product.get("brand"),
         "price": product.get("sale_price")
-        or product.get("price"),
-        "original_price": product.get("original_price"),
-        "discount": product.get("discount"),
-        "rating": product.get("rating"),
+        or product.get("market_price"),
+        "discount": product.get("discount_percent"),
     }
 
 
 def compact_product_details(product):
     """
     Return more information when the user explicitly asks
-    about a particular product.
+    about a particular product. Keep specs concise for tokens.
     """
 
     if not isinstance(product, dict):
@@ -125,10 +126,12 @@ def compact_product_details(product):
 
     result = compact_product(product)
 
+    spec = product.get("specification")
+    if spec and isinstance(spec, str) and len(spec) > 200:
+        spec = spec[:200] + "..."
+
     result.update({
-        "description": product.get("description"),
-        "specifications": product.get("specifications"),
-        "availability": product.get("availability"),
+        "specifications": spec,
         "stock": product.get("stock"),
     })
 
@@ -188,14 +191,17 @@ def compact_cart(cart):
     if not isinstance(cart, dict):
         return cart
 
+    # Handle both cart objects and nested 'cart' key
+    cart_obj = cart.get("cart") if "cart" in cart else cart
+
     result = {
-        "cart_id": cart.get("id") or cart.get("cart_id"),
-        "status": cart.get("status"),
-        "total": cart.get("total"),
-        "currency": cart.get("currency", "INR"),
+        "cart_id": cart_obj.get("id") or cart_obj.get("cart_id"),
+        "status": cart_obj.get("status"),
+        "total": cart_obj.get("total"),
+        "currency": cart_obj.get("currency", "INR"),
     }
 
-    items = cart.get("items")
+    items = cart_obj.get("items")
 
     if isinstance(items, list):
 
@@ -271,7 +277,7 @@ def compact_order(order):
 
 def limit_tool_result(result):
     """
-    Final safety net.
+    Final safety net for token limits.
 
     Even if one of the underlying tools accidentally returns
     a large object, don't send an unlimited amount of data
@@ -283,15 +289,13 @@ def limit_tool_result(result):
     if len(serialized) <= MAX_TOOL_RESULT_CHARS:
         return result
 
+    # Truncate aggressively for token limits
     return {
         "success": False,
-        "error": (
-            "Tool result was too large to return completely."
-        ),
+        "error": "Tool result truncated (too large).",
         "truncated": True,
-        "summary": serialized[
-            :MAX_TOOL_RESULT_CHARS
-        ],
+        "count": result.get("count", 0),
+        "summary": serialized[:MAX_TOOL_RESULT_CHARS],
     }
 
 
@@ -411,6 +415,13 @@ def catalog(
         result = get_product(
             product_id=product_id
         )
+
+        if not result["found"]:
+            return {
+                "error": "Product not found"
+            }
+
+        result = result["product"]
 
         return compact_product_details(result)
 
@@ -660,6 +671,7 @@ CHECKOUT_TOOL = {
         "name": "checkout",
         "description": (
             "Handle purchase checkout. "
+            "Use action='get_approval_summary' to get cart summary and check budget before approval. "
             "Use action='approve' ONLY when the buyer has "
             "explicitly confirmed the final cart total. "
             "Use action='create_payment' only after the cart "
@@ -674,12 +686,17 @@ CHECKOUT_TOOL = {
                 "action": {
                     "type": "string",
                     "enum": [
+                        "get_approval_summary",
                         "approve",
                         "create_payment"
                     ]
                 },
 
                 "cart_id": {
+                    "type": "string"
+                },
+
+                "session_id": {
                     "type": "string"
                 }
             },
@@ -696,6 +713,7 @@ CHECKOUT_TOOL = {
 def checkout(
     action,
     cart_id,
+    session_id=None,
 ):
     """
     Unified checkout operation.
@@ -709,6 +727,19 @@ def checkout(
             "success": False,
             "error": "cart_id is required."
         }
+
+    # --------------------------------------------------------
+    # APPROVAL SUMMARY (WITH BUDGET CHECK)
+    # --------------------------------------------------------
+
+    if action == "get_approval_summary":
+
+        result = check_cart_and_budget(
+            cart_id=cart_id,
+            session_id=session_id
+        )
+
+        return result
 
     # --------------------------------------------------------
     # APPROVAL
@@ -936,9 +967,26 @@ def execute_tool(tool_name, arguments):
 # LLM CALL
 # ============================================================
 
+def validate_tools():
+    """
+    Validate tool definitions to ensure they don't have
+    encoding issues or special characters.
+    """
+    for tool in tools:
+        if tool.get("type") == "function":
+            func = tool.get("function", {})
+            name = func.get("name", "")
+            # Ensure tool name is alphanumeric + underscore only
+            if not name or not name.replace("_", "").isalnum():
+                print(
+                    f"WARNING: Tool name '{name}' has invalid characters. "
+                    "This may cause Groq API errors."
+                )
+
+
 def call_llm(messages):
     """
-    Call Groq with retry handling.
+    Call Groq with retry handling and error management.
 
     Exponential backoff is preferable to a fixed 5-second
     retry because rate limits can persist for different
@@ -948,6 +996,8 @@ def call_llm(messages):
     for attempt in range(3):
 
         try:
+            # Validate tools before sending
+            validate_tools()
 
             return client.chat.completions.create(
                 model=MODEL,
@@ -970,6 +1020,20 @@ def call_llm(messages):
             )
 
             time.sleep(wait_time)
+
+        except Exception as e:
+            # Catch all other Groq errors
+            error_msg = str(e)
+            print(
+                f"Groq API error (attempt {attempt + 1}/3): {error_msg}",
+                file=sys.stderr
+            )
+            if attempt == 2:
+                # Last attempt failed, raise with context
+                raise RuntimeError(
+                    f"Groq API failed after 3 attempts: {error_msg}"
+                ) from e
+            time.sleep(2 ** attempt)
 
 
 # ============================================================
@@ -1089,122 +1153,194 @@ def chat(
         Final response
     """
 
-    history = get_session(
-        session_id
-    )
+    try:
 
-    # --------------------------------------------------------
-    # INITIALIZE SYSTEM MESSAGE
-    # --------------------------------------------------------
-
-    if not history:
-
-        history.append({
-            "role": "system",
-            "content": SYSTEM_PROMPT,
-        })
-
-    # --------------------------------------------------------
-    # USER MESSAGE
-    # --------------------------------------------------------
-
-    history.append({
-        "role": "user",
-        "content": user_message,
-    })
-
-    # --------------------------------------------------------
-    # LIMIT HISTORY
-    # --------------------------------------------------------
-
-    history = trim_history(
-        history
-    )
-
-    # --------------------------------------------------------
-    # AGENT LOOP
-    # --------------------------------------------------------
-
-    for round_number in range(
-        MAX_TOOL_ROUNDS
-    ):
-
-        response = call_llm(
-            messages=history
+        history = get_session(
+            session_id
         )
 
-        message = (
-            response
-            .choices[0]
-            .message
-        )
+        # --------------------------------------------------------
+        # INITIALIZE SYSTEM MESSAGE
+        # --------------------------------------------------------
 
-        # ----------------------------------------------------
-        # FINAL ANSWER
-        # ----------------------------------------------------
-
-        if not message.tool_calls:
-
-            assistant_content = (
-                message.content or ""
-            )
+        if not history:
 
             history.append({
-                "role": "assistant",
-                "content": assistant_content,
+                "role": "system",
+                "content": SYSTEM_PROMPT,
             })
 
-            return assistant_content
+        # --------------------------------------------------------
+        # USER MESSAGE
+        # --------------------------------------------------------
 
-        # ----------------------------------------------------
-        # STORE ASSISTANT TOOL CALL
-        # ----------------------------------------------------
+        history.append({
+            "role": "user",
+            "content": user_message,
+        })
 
-        normalized_message = (
-            normalize_assistant_message(
-                message
-            )
+        # --------------------------------------------------------
+        # LIMIT HISTORY
+        # --------------------------------------------------------
+
+        history = trim_history(
+            history
         )
 
-        history.append(
-            normalized_message
-        )
+        # --------------------------------------------------------
+        # AGENT LOOP
+        # --------------------------------------------------------
 
-        print(
-            f"Tool round {round_number + 1}: "
-            f"{len(message.tool_calls)} tool call(s)"
-        )
+        for round_number in range(
+            MAX_TOOL_ROUNDS
+        ):
 
-        # ----------------------------------------------------
-        # EXECUTE TOOLS
-        # ----------------------------------------------------
-
-        for tool_call in message.tool_calls:
-
-            tool_name = (
-                tool_call
-                .function
-                .name
+            response = call_llm(
+                messages=history
             )
 
-            try:
+            message = (
+                response
+                .choices[0]
+                .message
+            )
 
-                arguments = json.loads(
-                    tool_call
-                    .function
-                    .arguments
-                    or "{}"
+            # ----------------------------------------------------
+            # FINAL ANSWER
+            # ----------------------------------------------------
+
+            if not message.tool_calls:
+
+                assistant_content = (
+                    message.content or ""
                 )
 
-            except json.JSONDecodeError:
+                history.append({
+                    "role": "assistant",
+                    "content": assistant_content,
+                })
 
-                result = {
-                    "success": False,
-                    "error": (
-                        "Invalid JSON arguments "
-                        "generated for the tool."
+                return assistant_content
+
+            # ----------------------------------------------------
+            # STORE ASSISTANT TOOL CALL
+            # ----------------------------------------------------
+
+            normalized_message = (
+                normalize_assistant_message(
+                    message
+                )
+            )
+
+            history.append(
+                normalized_message
+            )
+
+            print(
+                f"Tool round {round_number + 1}: "
+                f"{len(message.tool_calls)} tool call(s)"
+            )
+
+            # ----------------------------------------------------
+            # EXECUTE TOOLS
+            # ----------------------------------------------------
+
+            for tool_call in message.tool_calls:
+
+                tool_name = (
+                    tool_call
+                    .function
+                    .name
+                )
+
+                try:
+
+                    arguments = json.loads(
+                        tool_call
+                        .function
+                        .arguments
+                        or "{}"
                     )
-                }
+
+                except json.JSONDecodeError:
+
+                    result = {
+                        "success": False,
+                        "error": (
+                            "Invalid JSON arguments "
+                            "generated for the tool."
+                        )
+                    }
+
+                    history.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": safe_json_dumps(
+                            result
+                        ),
+                    })
+
+                    continue
+
+                print(
+                    f"Executing tool: {tool_name}",
+                    arguments
+                )
+
+                # ------------------------------------------------
+                # EXECUTE (with session context for checkout)
+                # ------------------------------------------------
+
+                if tool_name == "checkout":
+                    arguments["session_id"] = session_id
+
+                result = execute_tool(
+                    tool_name,
+                    arguments
+                )
+
+                print(f"Tool {tool_name} result: {result}")
+
+                # ------------------------------------------------
+                # PAYMENT ORDER
+                # ------------------------------------------------
+
+                if tool_name == "checkout":
+
+                    action = arguments.get(
+                        "action"
+                    )
+
+                    if action == "create_payment":
+
+                        payment_response = (
+                            build_payment_response(
+                                result
+                            )
+                        )
+
+                        if payment_response:
+
+                            history.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": safe_json_dumps(
+                                    result
+                                ),
+                            })
+
+                            history.append({
+                                "role": "assistant",
+                                "content": safe_json_dumps(
+                                    payment_response
+                                ),
+                            })
+
+                            return payment_response
+
+                # ------------------------------------------------
+                # STORE TOOL RESULT
+                # ------------------------------------------------
 
                 history.append({
                     "role": "tool",
@@ -1214,86 +1350,40 @@ def chat(
                     ),
                 })
 
-                continue
+        # --------------------------------------------------------
+        # TOOL LIMIT
+        # --------------------------------------------------------
 
-            print(
-                f"Executing tool: {tool_name}",
-                arguments
-            )
+        fallback_message = (
+            "I wasn't able to complete the request "
+            "within the allowed number of steps. "
+            "Please try simplifying your request."
+        )
 
-            # ------------------------------------------------
-            # EXECUTE
-            # ------------------------------------------------
+        history.append({
+            "role": "assistant",
+            "content": fallback_message,
+        })
 
-            result = execute_tool(
-                tool_name,
-                arguments
-            )
+        return fallback_message
 
-            print(f"Tool {tool_name} result: {result}")
+    except RuntimeError as e:
+        # Groq API errors or other runtime errors
+        error_msg = str(e)
+        print(f"Runtime error in chat: {error_msg}", file=sys.stderr)
+        # Return error as JSON string for frontend parsing
+        return json.dumps({
+            "error": "Service Error",
+            "message": error_msg,
+            "type": "groq_api_error"
+        })
 
-            # ------------------------------------------------
-            # PAYMENT ORDER
-            # ------------------------------------------------
-
-            if tool_name == "checkout":
-
-                action = arguments.get(
-                    "action"
-                )
-
-                if action == "create_payment":
-
-                    payment_response = (
-                        build_payment_response(
-                            result
-                        )
-                    )
-
-                    if payment_response:
-
-                        history.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": safe_json_dumps(
-                                result
-                            ),
-                        })
-
-                        history.append({
-                            "role": "assistant",
-                            "content": safe_json_dumps(
-                                payment_response
-                            ),
-                        })
-
-                        return payment_response
-
-            # ------------------------------------------------
-            # STORE TOOL RESULT
-            # ------------------------------------------------
-
-            history.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": safe_json_dumps(
-                    result
-                ),
-            })
-
-    # --------------------------------------------------------
-    # TOOL LIMIT
-    # --------------------------------------------------------
-
-    fallback_message = (
-        "I wasn't able to complete the request "
-        "within the allowed number of steps. "
-        "Please try simplifying your request."
-    )
-
-    history.append({
-        "role": "assistant",
-        "content": fallback_message,
-    })
-
-    return fallback_message
+    except Exception as e:
+        # Catch all unexpected errors
+        error_msg = str(e)
+        print(f"Unexpected error in chat: {error_msg}", file=sys.stderr)
+        return json.dumps({
+            "error": "Unexpected Error",
+            "message": "An unexpected error occurred. Please try again.",
+            "type": "unknown_error"
+        })

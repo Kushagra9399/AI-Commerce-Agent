@@ -67,7 +67,7 @@ export const CommerceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [orderId, setOrderIdState] = useState<string | null>(() => sessionService.getOrderId());
 
   const [cart, setCart] = useState<Cart>(() => ({
-    cart_id: sessionService.getCartId() || '',
+    cart_id: '',
     status: 'active',
     items: [],
     total_amount: 0,
@@ -141,14 +141,28 @@ export const CommerceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   // Initial cart load if cartId was restored from session
   useEffect(() => {
-    if (cartId) {
+    if (cartId && cartId.trim()) {
       api.getCart(cartId).then((existingCart) => {
-        if (existingCart && existingCart.items) {
+        if (existingCart && existingCart.cart_id && existingCart.items) {
           setCart(existingCart);
+          sessionService.saveCart(existingCart);
         }
+      }).catch((err) => {
+        console.warn('Failed to load cart:', err);
+        // If cart fetch fails, clear the cartId
+        setCartId(null);
+      });
+    } else {
+      // If cartId is null or empty, ensure cart is cleared
+      setCart({
+        cart_id: '',
+        status: 'active',
+        items: [],
+        total_amount: 0,
+        currency: 'INR',
       });
     }
-  }, [cartId]);
+  }, [cartId, setCartId]);
 
   const addAuditLog = useCallback(
     (
@@ -184,14 +198,20 @@ export const CommerceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const refreshCart = useCallback(
     async (targetCartId?: string) => {
       const cid = targetCartId || cartId;
-      if (!cid) return;
+      if (!cid || !cid.trim()) return;
       try {
         const freshCart = await api.getCart(cid);
-        if (freshCart) {
+        if (freshCart && freshCart.cart_id && freshCart.items) {
           setCart(freshCart);
+          sessionService.saveCart(freshCart);
+        } else if (freshCart && !freshCart.items.length) {
+          // Cart exists but is empty - keep the data but don't error
+          setCart(freshCart);
+          sessionService.saveCart(freshCart);
         }
       } catch (err) {
         console.warn('refreshCart failed', err);
+        // On error, don't clear the local cart - let user retry
       }
     },
     [cartId]
@@ -225,12 +245,30 @@ export const CommerceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           ? {
               ...o,
               status,
+              payment_status: status === 'paid' ? 'paid' : o.payment_status,
               ...(paymentId ? { payment_id: paymentId } : {}),
             }
           : o
       )
     );
-  }, []);
+    // Clear cart and order after successful payment
+    if (status === 'paid') {
+      setCart({
+        cart_id: '',
+        status: 'active',
+        items: [],
+        total_amount: 0,
+        currency: 'INR',
+      });
+      setCartId(null);
+      sessionService.setCartId(null);
+      // Also clear saved cart data to prevent reloading
+      sessionService.saveCart(null);
+      // Clear orderId to prevent payment button from reappearing
+      setOrderId(null);
+      sessionService.setOrderId(null);
+    }
+  }, [setCartId, setOrderId]);
 
   const sendMessage = async (text: string) => {
     const userMsg: ChatMessage = {
@@ -256,13 +294,25 @@ export const CommerceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       // `response.message` when tools produce a dict. Support both shapes.
       const payload = typeof response.message === 'object' && response.message !== null ? response.message : response;
 
+      const dedupeByName = (arr: any[] | undefined) => {
+        if (!arr || arr.length === 0) return [];
+        const seen = new Set<string>();
+        return arr.filter((p) => {
+          const n = (p.name || '').trim().toLowerCase();
+          if (!n) return true;
+          if (seen.has(n)) return false;
+          seen.add(n);
+          return true;
+        });
+      };
+
       const agentMsg: ChatMessage = {
         id: `msg_agent_${Date.now()}`,
         sender: 'agent',
         text: typeof response.message === 'string' ? response.message : (payload.message || JSON.stringify(payload)),
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        products: payload.products,
-        crossSell: payload.crossSell,
+        products: dedupeByName(payload.products),
+        crossSell: dedupeByName(payload.crossSell),
         upsell: payload.upsell,
         payment: payload.payment,
       };
@@ -304,12 +354,12 @@ export const CommerceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       setMessages((prev) => [...prev, agentMsg]);
 
-      if (response.products && response.products.length > 0) {
+      if (agentMsg.products && agentMsg.products.length > 0) {
         addAuditLog(
           'Product Results',
           'AI Search & Ranking',
           'AI Agent',
-          `Returned ${response.products.length} matching product(s)`
+          `Returned ${agentMsg.products.length} matching product(s)`
         );
       }
       if (response.upsell?.available) {
@@ -320,25 +370,43 @@ export const CommerceProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           `Proposed upgrade to ${response.upsell.upgrade?.name} (+₹${response.upsell.additional_cost})`
         );
       }
-      if (response.crossSell && response.crossSell.length > 0) {
+      if (agentMsg.crossSell && agentMsg.crossSell.length > 0) {
         addAuditLog(
           'Cross-sell Shown',
           'Accessory Compatibility Check',
           'AI Agent',
-          `Suggested ${response.crossSell.length} compatible accessory add-on(s)`
+          `Suggested ${agentMsg.crossSell.length} compatible accessory add-on(s)`
         );
       }
     } catch (err: any) {
       console.error('Chat error:', err);
+      
+      // Extract error message and type for better error display
+      const errorMessage = err?.message || 'Unable to connect to backend service.';
+      const errorDisplay = errorMessage.includes('Groq') 
+        ? `⚠️ AI service error: ${errorMessage}. Please try your request again.`
+        : errorMessage.includes('Server error')
+        ? `⚠️ Server error. Please try again in a moment.`
+        : `⚠️ ${errorMessage}`;
+      
       setMessages((prev) => [
         ...prev,
         {
           id: `msg_err_${Date.now()}`,
           sender: 'system',
-          text: `⚠️ ${err?.message || 'Unable to connect to backend service.'}`,
+          text: errorDisplay,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         },
       ]);
+      
+      // Log error to audit trail for debugging
+      addAuditLog(
+        'Chat Error',
+        'Error during conversation',
+        'System',
+        errorMessage,
+        'failed'
+      );
     } finally {
       setIsLoadingChat(false);
     }

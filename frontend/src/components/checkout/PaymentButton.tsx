@@ -42,11 +42,16 @@ export const PaymentButton: React.FC<PaymentButtonProps> = ({
   const [verifiedInfo, setVerifiedInfo] = useState<PaymentVerifyResponse | null>(null);
 
   const formatINR = (val: number) => {
-    // If val is in paise (e.g. 180730 for ₹1807.30), format appropriately
-    const displayAmount = val > 100000 && Number.isInteger(val) ? val / 100 : val;
+    // Ensure proper conversion: if value looks like paise (> 100000), divide by 100
+    // Paise is always an integer, so if it's > 100000 and integer, it's likely paise
+    let displayAmount = val;
+    if (typeof val === 'number' && val > 100000) {
+      displayAmount = val / 100;
+    }
     return new Intl.NumberFormat('en-IN', {
       style: 'currency',
       currency: paymentData.currency || 'INR',
+      minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     }).format(displayAmount);
   };

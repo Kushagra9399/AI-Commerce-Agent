@@ -19,6 +19,18 @@ export const CrossSellCard: React.FC<CrossSellCardProps> = ({
     return null;
   }
 
+  // Deduplicate by product name to avoid showing duplicates
+  const uniqueProducts = (() => {
+    const seen = new Set<string>();
+    return products.filter((p) => {
+      const n = (p.name || '').trim().toLowerCase();
+      if (!n) return true;
+      if (seen.has(n)) return false;
+      seen.add(n);
+      return true;
+    });
+  })();
+
   const formatINR = (val: number) => {
     return new Intl.NumberFormat('en-IN', {
       style: 'currency',
@@ -43,7 +55,7 @@ export const CrossSellCard: React.FC<CrossSellCardProps> = ({
       </div>
 
       <div className="cross-sell-grid">
-        {products.map((item) => (
+        {uniqueProducts.map((item) => (
           <div key={item.id} className="cross-sell-mini-card">
             <div>
               {item.image && (

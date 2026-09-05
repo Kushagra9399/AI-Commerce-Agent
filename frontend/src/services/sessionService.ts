@@ -8,6 +8,7 @@
 const STORAGE_KEYS = {
   SESSION_ID: 'ai_commerce_session_id',
   CART_ID: 'ai_commerce_cart_id',
+  CART_DATA: 'ai_commerce_cart_data',
   ORDER_ID: 'ai_commerce_order_id',
   ORDERS: 'ai_commerce_orders_list',
   MESSAGES: 'ai_commerce_messages',
@@ -54,6 +55,25 @@ export const sessionService = {
         sessionStorage.removeItem(STORAGE_KEYS.CART_ID);
         localStorage.removeItem(STORAGE_KEYS.CART_ID);
       }
+    } catch {
+      // ignore
+    }
+  },
+
+  getCart<T>(): T | null {
+    try {
+      const data = sessionStorage.getItem(STORAGE_KEYS.CART_DATA) || localStorage.getItem(STORAGE_KEYS.CART_DATA);
+      return data ? JSON.parse(data) : null;
+    } catch {
+      return null;
+    }
+  },
+
+  saveCart<T>(cart: T): void {
+    try {
+      const cartData = JSON.stringify(cart);
+      sessionStorage.setItem(STORAGE_KEYS.CART_DATA, cartData);
+      localStorage.setItem(STORAGE_KEYS.CART_DATA, cartData);
     } catch {
       // ignore
     }
@@ -137,12 +157,14 @@ export const sessionService = {
     try {
       sessionStorage.removeItem(STORAGE_KEYS.SESSION_ID);
       sessionStorage.removeItem(STORAGE_KEYS.CART_ID);
+      sessionStorage.removeItem(STORAGE_KEYS.CART_DATA);
       sessionStorage.removeItem(STORAGE_KEYS.ORDER_ID);
       sessionStorage.removeItem(STORAGE_KEYS.MESSAGES);
       sessionStorage.removeItem(STORAGE_KEYS.AUDIT_EVENTS);
 
       localStorage.removeItem(STORAGE_KEYS.SESSION_ID);
       localStorage.removeItem(STORAGE_KEYS.CART_ID);
+      localStorage.removeItem(STORAGE_KEYS.CART_DATA);
       localStorage.removeItem(STORAGE_KEYS.ORDER_ID);
     } catch {
       // ignore
