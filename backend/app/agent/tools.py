@@ -1,9 +1,6 @@
 import uuid
 
 from app.db.session import db_session
-from app.services.recommendation_service import (
-    RecommendationService
-)
 from app.services.product_search_service import ProductSearchService
 
 from app.services.order_service import (
@@ -12,7 +9,6 @@ from app.services.order_service import (
     get_order as get_order_service
 )
 
-from app.services.upsell_service import UpsellService
 from app.services.audit_service import log_event
 
 from app.db.models import Cart, Product
@@ -31,8 +27,6 @@ from app.agent.session import (
 
 
 product_search_service = ProductSearchService()
-recommendation_service = RecommendationService()
-upsell_service = UpsellService()
 
 
 def search_products(
@@ -67,25 +61,11 @@ def search_products(
 
 
 def get_product(product_id: str):
-    """
-    Retrieve the complete information for one product.
-
-    This is used after the user selects a product.
-    """
-
-    for product in product_search_service.metadata:
-
-        if product["product_id"] == product_id:
-
-            return {
-                "found": True,
-                "product": product
-            }
-
-    return {
-        "found": False,
-        "product": None
-    }
+    """Fetch a selected Amazon product's full details from SerpAPI."""
+    product = product_search_service.get_product(product_id)
+    if not product:
+        return {"found": False, "product": None, "message": "Product not found."}
+    return {"found": True, "product": product}
 
 
 def recommend_addons(
@@ -93,140 +73,75 @@ def recommend_addons(
     budget_remaining: float | None = None,
     limit: int = 3
 ):
-
-    with db_session() as db:
-
-        products = (
-            recommendation_service
-            .get_cross_sell_products(
-                db=db,
-                product_id=product_id,
-                budget_remaining=budget_remaining,
-                limit=limit
-            )
-        )
-
-        # Get the base product for context
-        base_product = db.query(Product).filter(Product.id == product_id).first()
-        base_category = base_product.category if base_product else None
-
-        recommendations = []
-        for product in products:
-            reason = "Pairs well with your selection"
-            
-            # Add category-specific reasoning
-            if base_category and product.category:
-                if base_category == product.category:
-                    reason = f"Complements your {base_category.lower()}"
-                else:
-                    reason = f"Popular add-on to {base_category.lower()} purchases"
-            
-            # Add price-based reasoning
-            if product.discount_percent and float(product.discount_percent) > 15:
-                reason += f" (great value: {product.discount_percent}% off)"
-            
-            recommendations.append({
-                "product_id": product.id,
-                "name": product.name,
-                "brand": product.brand,
-                "category": product.category,
-                "sale_price": float(product.sale_price),
-                "discount_percent": float(product.discount_percent),
-                "stock": product.stock,
-                "why": reason
-            })
-
+    """Find complementary products using the selected product's SerpAPI title."""
+    base = product_search_service.get_product(product_id)
+    if not base:
         return {
             "product_id": product_id,
-            "budget_remaining": budget_remaining,
-            "count": len(recommendations),
-            "recommendations": recommendations
+            "count": 0,
+            "recommendations": [],
+            "message": "Could not retrieve the selected product from Amazon."
         }
 
+    query = f"{base.get('name', '')} accessories compatible add-ons"
+    products = product_search_service.search(
+        query=query,
+        top_k=limit,
+        max_price=budget_remaining
+    )
+    products = [p for p in products if p.get("id") != str(product_id)]
+    return {
+        "product_id": product_id,
+        "base_product": base,
+        "budget_remaining": budget_remaining,
+        "count": len(products),
+        "recommendations": [
+            {**p, "why": f"Potential complementary item for {base.get('name', 'your selected product')}."}
+            for p in products
+        ]
+    }
 
-def recommend_upgrade(
-    product_id: str
-):
-    """
-    Find a suitable higher-value product upgrade.
 
-    Used by the AI agent after a product has been selected.
-    """
-
-    with db_session() as db:
-
-        product = (
-            db.query(Product)
-            .filter(Product.id == product_id)
-            .first()
-        )
-
-        if not product:
-            return {
-                "found": False,
-                "message": "Product not found."
-            }
-
-        upgrade = upsell_service.find_upgrade(
-            db=db,
-            product=product
-        )
-
-        if not upgrade:
-            return {
-                "found": False,
-                "product_id": product_id,
-                "message": "No suitable upgrade found."
-            }
-
-        additional_cost = (
-            float(upgrade.sale_price)
-            - float(product.sale_price)
-        )
-
-        # Generate reasoning
-        upgrade_reason = f"Better model in the same category"
-        
-        if upgrade.brand and product.brand and upgrade.brand.lower() == product.brand.lower():
-            upgrade_reason = f"Same brand, better specs within {upgrade.brand}"
-        
-        discount_diff = float(upgrade.discount_percent) - float(product.discount_percent)
-        if discount_diff > 5:
-            upgrade_reason += f" (extra {discount_diff:.1f}% off)"
-
+def recommend_upgrade(product_id: str):
+    """Find a premium alternative using SerpAPI rather than local DB relations."""
+    base = product_search_service.get_product(product_id)
+    if not base:
         return {
-            "found": True,
-
-            "current_product": {
-                "product_id": product.id,
-                "name": product.name,
-                "brand": product.brand,
-                "category": product.category,
-                "sale_price": float(
-                    product.sale_price
-                )
-            },
-
-            "upgrade": {
-                "product_id": upgrade.id,
-                "name": upgrade.name,
-                "brand": upgrade.brand,
-                "category": upgrade.category,
-                "sale_price": float(
-                    upgrade.sale_price
-                ),
-                "discount_percent": float(
-                    upgrade.discount_percent
-                ),
-                "stock": upgrade.stock,
-                "why": upgrade_reason
-            },
-
-            "additional_cost": round(
-                additional_cost,
-                2
-            )
+            "found": False,
+            "product_id": product_id,
+            "message": "Could not retrieve the selected product from Amazon."
         }
+
+    query = f"{base.get('name', '')} better premium upgraded alternative"
+    current_price = base.get("sale_price")
+    max_price = round(float(current_price) * 1.5, 2) if current_price is not None else None
+    candidates = product_search_service.search(
+        query=query,
+        top_k=5,
+        min_price=float(current_price) if current_price is not None else None,
+        max_price=max_price
+    )
+    candidates = [p for p in candidates if p.get("id") != str(product_id)]
+    if not candidates:
+        return {
+            "found": False,
+            "product_id": product_id,
+            "message": "No suitable upgrade found in SerpAPI results."
+        }
+
+    upgrade = candidates[0]
+    additional_cost = None
+    if current_price is not None and upgrade.get("sale_price") is not None:
+        additional_cost = round(float(upgrade["sale_price"]) - float(current_price), 2)
+    return {
+        "found": True,
+        "current_product": base,
+        "upgrade": {
+            **upgrade,
+            "why": "A higher-priced alternative found from the live marketplace search."
+        },
+        "additional_cost": additional_cost
+    }
 
 
 def create_cart():
