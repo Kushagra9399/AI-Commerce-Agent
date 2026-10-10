@@ -32,7 +32,7 @@ class ProductSearchService:
     def _discount(value):
         if value is None:
             return None
-        match = re.search(r"(\d+(?:\.\d+)?)\\s*%", str(value))
+        match = re.search(r"(\d+(?:\.\d+)?)\s*%", str(value))
         return float(match.group(1)) if match else None
 
     def _request(self, params):
@@ -89,6 +89,7 @@ class ProductSearchService:
             "thumbnail": item.get("thumbnail"),
             "image": item.get("thumbnail"),
             "link": item.get("link"),
+            "specification": item.get("feature_bullets") or item.get("description"),
             "source": "serpapi_amazon_in",
             "stock": None,
             "is_active": True,
