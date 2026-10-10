@@ -1,5 +1,3 @@
-import uuid
-
 from app.db.session import db_session
 from app.services.product_search_service import ProductSearchService
 
@@ -11,7 +9,7 @@ from app.services.order_service import (
 
 from app.services.audit_service import log_event
 
-from app.db.models import Cart, Product
+from app.db.models import Product
 from app.services.cart_service import (
     create_cart as create_cart_service,
     add_product_to_cart,
@@ -21,8 +19,7 @@ from app.services.cart_service import (
 )
 
 from app.agent.session import (
-    get_session_metadata,
-    update_session_metadata
+    get_session_metadata
 )
 
 
