@@ -540,6 +540,16 @@ Then run the provided data-processing / embedding scripts.
 
 ---
 
+## SerpAPI Product Search Setup
+
+The agent uses SerpAPI's Amazon India engine for product search, product details, upgrades, and add-on recommendations. Set the key in `backend/.env`:
+
+```env
+SERPAPI_API_KEY=your_serpapi_api_key
+```
+
+No additional Python package is needed for SerpAPI requests; the backend uses Python's standard library. Search results include the Amazon ASIN, title, price when available, image, rating, and product link. Price and brand filters are applied to the returned marketplace results.
+
 ## 6. Start the Backend
 
 From the `backend` directory:
