@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     DEMO_PAYMENT_FAILURE: bool = False
 
     GROQ_API_KEY: str
+    SERPAPI_API_KEY: str | None = None
 
     class Config:
         env_file=".env"
