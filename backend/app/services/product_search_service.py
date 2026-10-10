@@ -20,7 +20,7 @@ class ProductSearchService:
             return float(value)
         if not value:
             return None
-        match = re.search(r"[-+]?\\d[\\d,]*(?:\\.\\d+)?", str(value))
+        match = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", str(value))
         if not match:
             return None
         try:
@@ -32,7 +32,7 @@ class ProductSearchService:
     def _discount(value):
         if value is None:
             return None
-        match = re.search(r"(\\d+(?:\\.\\d+)?)\\s*%", str(value))
+        match = re.search(r"(\d+(?:\.\d+)?)\\s*%", str(value))
         return float(match.group(1)) if match else None
 
     def _request(self, params):
