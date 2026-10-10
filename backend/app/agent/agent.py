@@ -101,17 +101,29 @@ def compact_product(product):
     if not isinstance(product, dict):
         return product
 
+    price = (
+        product.get("sale_price")
+        if product.get("sale_price") is not None
+        else product.get("extracted_price")
+    )
+    if price is None:
+        price = product.get("price")
+    if price is None:
+        price = product.get("market_price")
+
     return {
-        "id": str(
-            product.get("id")
-            or product.get("product_id")
-            or ""
-        ),
-        "name": product.get("name"),
+        "id": str(product.get("id") or product.get("product_id") or product.get("asin") or ""),
+        "product_id": str(product.get("product_id") or product.get("asin") or product.get("id") or ""),
+        "name": product.get("name") or product.get("title"),
         "brand": product.get("brand"),
-        "price": product.get("sale_price")
-        or product.get("market_price"),
-        "discount": product.get("discount_percent"),
+        "price": price,
+        "discount": product.get("discount_percent") or product.get("discount"),
+        "rating": product.get("rating"),
+        "reviews": product.get("reviews"),
+        "thumbnail": product.get("thumbnail") or product.get("image"),
+        "link": product.get("link"),
+        "source": product.get("source"),
+        "why": product.get("why"),
     }
 
 
@@ -502,7 +514,7 @@ def product_recommendations(
             limit=limit,
         )
 
-        return compact_product_list(result)
+        return result
 
     if action == "upgrade":
 
@@ -510,7 +522,7 @@ def product_recommendations(
             product_id=product_id
         )
 
-        return compact_product_list(result)
+        return result
 
     return {
         "success": False,
