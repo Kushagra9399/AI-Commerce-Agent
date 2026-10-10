@@ -9,7 +9,6 @@ from app.services.order_service import (
 
 from app.services.audit_service import log_event
 
-from app.db.models import Product
 from app.services.cart_service import (
     create_cart as create_cart_service,
     add_product_to_cart,
