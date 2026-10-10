@@ -1,52 +1,98 @@
 import json
-import os
+import re
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
-import faiss
-import numpy as np
-from sentence_transformers import SentenceTransformer
+from app.core.config import settings
 
 
 class ProductSearchService:
+    """Search Amazon product listings through SerpAPI."""
 
-    def __init__(
-        self,
-        index_path: str = "data/product_index.faiss",
-        metadata_path: str = "data/product_metadata.json"
-    ):
-        self.index_path = index_path
-        self.metadata_path = metadata_path
+    def __init__(self, timeout: int = 15):
+        self.timeout = timeout
+        self.api_key = settings.SERPAPI_API_KEY
 
-        self.model = SentenceTransformer(
-            "all-MiniLM-L6-v2"
-        )
+    @staticmethod
+    def _price(value):
+        if isinstance(value, (int, float)):
+            return float(value)
+        if not value:
+            return None
+        match = re.search(r"[-+]?\\d[\\d,]*(?:\\.\\d+)?", str(value))
+        if not match:
+            return None
+        try:
+            return float(match.group(0).replace(",", ""))
+        except ValueError:
+            return None
 
-        self.index = None
-        self.metadata = None
+    @staticmethod
+    def _discount(value):
+        if value is None:
+            return None
+        match = re.search(r"(\\d+(?:\\.\\d+)?)\\s*%", str(value))
+        return float(match.group(1)) if match else None
 
-        self._load()
+    def _request(self, params):
+        if not self.api_key:
+            raise RuntimeError("SERPAPI_API_KEY is not configured in the backend environment.")
 
-    def _load(self):
+        params = {
+            **params,
+            "api_key": self.api_key,
+            "amazon_domain": "amazon.in",
+        }
+        url = "https://serpapi.com/search.json?" + urlencode(params)
+        request = Request(url, headers={"User-Agent": "AI-Commerce-Agent/1.0"})
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            raise RuntimeError(f"SerpAPI request failed with HTTP {exc.code}.") from exc
+        except (URLError, TimeoutError) as exc:
+            raise RuntimeError("Could not connect to SerpAPI. Check network connectivity.") from exc
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("SerpAPI returned an invalid JSON response.") from exc
 
-        if not os.path.exists(self.index_path):
-            raise FileNotFoundError(
-                f"FAISS index not found: {self.index_path}"
-            )
+        if data.get("error"):
+            raise RuntimeError(f"SerpAPI error: {data['error']}")
+        return data
 
-        if not os.path.exists(self.metadata_path):
-            raise FileNotFoundError(
-                f"Metadata not found: {self.metadata_path}"
-            )
+    def _normalize(self, item):
+        price = self._price(item.get("extracted_price"))
+        if price is None:
+            price = self._price(item.get("price"))
+        title = item.get("title") or item.get("name")
+        asin = item.get("asin") or item.get("product_id")
+        if not title or not asin:
+            return None
 
-        self.index = faiss.read_index(
-            self.index_path
-        )
-
-        with open(
-            self.metadata_path,
-            "r",
-            encoding="utf-8"
-        ) as f:
-            self.metadata = json.load(f)
+        discount = self._discount(item.get("discount"))
+        return {
+            "id": str(asin),
+            "product_id": str(asin),
+            "asin": str(asin),
+            "name": title,
+            "title": title,
+            "brand": item.get("brand") or "Unknown",
+            "category": item.get("category"),
+            "sale_price": price,
+            "price": price,
+            "extracted_price": price,
+            "market_price": self._price(item.get("old_price")),
+            "discount_percent": discount,
+            "discount": item.get("discount"),
+            "rating": item.get("rating"),
+            "reviews": item.get("reviews"),
+            "thumbnail": item.get("thumbnail"),
+            "image": item.get("thumbnail"),
+            "link": item.get("link"),
+            "source": "serpapi_amazon_in",
+            "stock": None,
+            "is_active": True,
+        }
 
     def search(
         self,
@@ -56,86 +102,49 @@ class ProductSearchService:
         min_price: float | None = None,
         brand: str | None = None,
         min_discount: float | None = None,
-        in_stock_only: bool = True
+        in_stock_only: bool = False,
     ):
+        if not query or not query.strip():
+            return []
 
-        query_embedding = self.model.encode(
-            [query],
-            normalize_embeddings=True
-        )
-
-        query_embedding = np.asarray(
-            query_embedding,
-            dtype="float32"
-        )
-
-        scores, indices = self.index.search(
-            query_embedding,
-            max(top_k * 10, 50)
-        )
-
+        data = self._request({
+            "engine": "amazon",
+            "k": query.strip(),
+        })
+        raw_results = data.get("organic_results") or []
         results = []
-        seen_names = set()
+        seen = set()
 
-        for score, index in zip(
-            scores[0],
-            indices[0]
-        ):
+        for raw in raw_results:
+            product = self._normalize(raw)
+            if not product or product["id"] in seen:
+                continue
+            seen.add(product["id"])
 
-            if index < 0:
+            price = product["sale_price"]
+            if max_price is not None and (price is None or price > max_price):
+                continue
+            if min_price is not None and (price is None or price < min_price):
+                continue
+            if brand and brand.lower() not in product["name"].lower() and brand.lower() not in product["brand"].lower():
+                continue
+            if min_discount is not None and (product["discount_percent"] is None or product["discount_percent"] < min_discount):
                 continue
 
-            product = self.metadata[index]
-
-            # Skip duplicates by product name (case-insensitive)
-            name_key = product["name"].strip().lower() if product.get("name") else ""
-            if name_key and name_key in seen_names:
-                continue
-            if name_key:
-                seen_names.add(name_key)
-
-            if in_stock_only and (
-                not product["is_active"]
-                or int(product.get("stock", 0)) <= 0
-            ):
-                continue
-
-            if max_price is not None:
-                if float(product["sale_price"]) > max_price:
-                    continue
-
-            if min_price is not None:
-                if float(product["sale_price"]) < min_price:
-                    continue
-
-            if min_discount is not None:
-                if float(product["discount_percent"]) < min_discount:
-                    continue
-
-            if brand is not None:
-                if (
-                    not product["brand"]
-                    or product["brand"].lower() != brand.lower()
-                ):
-                    continue
-
-            results.append({
-                "product_id": product["product_id"],
-                "name": product["name"],
-                "brand": product["brand"],
-                "category": product["category"],
-                "market_price": product["market_price"],
-                "sale_price": product["sale_price"],
-                "discount_percent": product["discount_percent"],
-                "stock": product["stock"],
-                "is_active": product["is_active"],
-                "similarity_score": round(
-                    float(score),
-                    4
-                )
-            })
-                
-            if len(results) >= top_k:
+            results.append(product)
+            if len(results) >= max(1, min(top_k, 20)):
                 break
 
         return results
+
+    def get_product(self, product_id: str):
+        if not product_id:
+            return None
+        data = self._request({
+            "engine": "amazon_product",
+            "asin": product_id,
+        })
+        raw = data.get("product_results")
+        if not isinstance(raw, dict):
+            return None
+        return self._normalize(raw)
